@@ -2,10 +2,10 @@ import os
 import logging
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
+from datasets import load_dataset, concatenate_datasets
 
 import torch
-import nlp
-from transformers import T5Tokenizer, BartTokenizer, HfArgumentParser
+from transformers import T5Tokenizer, BartTokenizer, HfArgumentParser, AutoTokenizer
 
 
 logger = logging.getLogger(__name__)
@@ -16,14 +16,6 @@ class DataTrainingArguments:
     """
     Arguments pertaining to what data we are going to input our model for training and eval.
     """
-    task: str = field(
-        metadata={"help": "Which task 'qa', 'qg', 'e2e_qg', 'ans_ext', 'multi'. 'multi' means 'qa', 'qg', 'ans_ext' tasks"}, 
-    )
-    model_type: str = field(metadata={"help": "One of 't5', 'bart'"})
-    dataset_path: Optional[str] = field(
-        default="data/squad_multitask",
-        metadata={"help": "Path for dataset directory"}, 
-    )
     train_file_name: Optional[str] = field(
         default=None,
         metadata={"help": "name for cached train dataset"},
@@ -31,14 +23,6 @@ class DataTrainingArguments:
     valid_file_name: Optional[str] = field(
         default=None,
         metadata={"help": "name for cached valid dataset"},
-    )
-    valid_for_qg_only: bool = field(
-        default=False,
-        metadata={"help": "For multitask dataset valid split should contain only qg task or all tasks."}
-    )
-    qg_format: Optional[str] = field(
-        default='highlight_qg_format',
-        metadata={"help": "How to format inputs for que generation, 'highlight_qg_format' or 'prepend_qg_format'"}, 
     )
     max_source_length: Optional[int] = field(
         default=512,
@@ -56,18 +40,11 @@ class DataProcessor:
         self.max_target_length = max_target_length
         self.model_type = model_type
         self.hl_token = "<hl>"
-        
-        if model_type == "t5":
-            self.sep_token = "<sep>"
-        elif model_type == "bart":
-            self.sep_token = "<sep>"
-        else:
-            self.sep_token = "[SEP]"
+        self.sep_token = "<sep>"
+
   
     def process(self, dataset):
-        if self.model_type == "t5":
-            dataset = dataset.map(self._add_eos_examples)
-        
+        dataset = dataset.map(self._add_eos_examples)
         dataset = dataset.map(self._add_special_tokens)
         dataset = dataset.map(self._convert_to_features, batched=True)
         
@@ -108,36 +85,22 @@ class DataProcessor:
 
         return encodings
 
+def create_qa(dataset):
+    dataset['context'] = "question: " + dataset['question'] + "  context: " + dataset['context']
+    dataset['answers'] = dataset['answers']['text'][0]
 
-def filter_qa(example):
-    return example['task'] == 'qa'
+    return dataset
 
-def filter_qg(example):
-    return example['task'] == 'qg'
+def create_qg(dataset):
+    dataset['context'] = "generate question: " + dataset['context']
 
-def filter_e2e_qg(example):
-    return example['task'] == 'e2e_qg'
-
-def filter_ans_ext(example):
-    return example['task'] == 'ans_ext'
-
-def filter_multi(example):
-    return example['task'] != 'e2e_qg'
-
-
-TASK_TO_FILTER_FN = {
-    'qa': filter_qa,
-    'qg': filter_qg,
-    'e2e_qg': filter_e2e_qg,
-    'ans_ext': filter_ans_ext,
-    'multi': filter_multi
-}
-
+    return dataset
 
 def main():
     parser = HfArgumentParser((DataTrainingArguments,))
 
     data_args = parser.parse_args_into_dataclasses()[0]
+    model_type = "t5"
 
     logging.basicConfig(
         format="%(asctime)s - %(levelname)s - %(name)s -   %(message)s",
@@ -145,31 +108,32 @@ def main():
         level=logging.INFO
     )
 
-    if data_args.model_type == 't5':
-        tokenizer = T5Tokenizer.from_pretrained("t5-base")
-    else:
-        tokenizer = BartTokenizer.from_pretrained("facebook/bart-base")
-    
+    tokenizer = AutoTokenizer.from_pretrained("KETI-AIR/ke-t5-base")
     tokenizer.add_tokens(['<sep>', '<hl>'])
+
+    # KLUE DATASET
+    klue_dataset = load_dataset("klue", "mrc").remove_columns(['guid', 'is_impossible', 'news_category', 'question_type', 'source', 'title'])
+    ## QA
+    klue_dataset_qa = klue_dataset.map(create_qa)
+    klue_dataset_qa = klue_dataset_qa.rename_column('context', 'source_text')
+    klue_dataset_qa = klue_dataset_qa.rename_column('answers', 'target_text')
+    klue_dataset_qa = klue_dataset_qa.remove_columns('question')
+    ## QG
+    klue_dataset_qg = klue_dataset.map(create_qg)
+    klue_dataset_qg = klue_dataset_qg.rename_column('context', 'source_text')
+    klue_dataset_qg = klue_dataset_qg.rename_column('question', 'target_text')
+    klue_dataset_qg = klue_dataset_qg.remove_columns('answers')
     
-    train_dataset = nlp.load_dataset(data_args.dataset_path, name=data_args.qg_format, split=nlp.Split.TRAIN)
-    valid_dataset = nlp.load_dataset(data_args.dataset_path, name=data_args.qg_format, split=nlp.Split.VALIDATION)
+    train_dataset = concatenate_datasets([klue_dataset_qa['train'], klue_dataset_qg['train']]).shuffle()
+    valid_dataset = concatenate_datasets([klue_dataset_qa['validation'], klue_dataset_qg['validation']])
 
     processor = DataProcessor(
         tokenizer,
-        model_type=data_args.model_type,
+        model_type=model_type,
         max_source_length=data_args.max_source_length,
         max_target_length=data_args.max_target_length
     )
 
-    train_dataset = train_dataset.filter(TASK_TO_FILTER_FN[data_args.task])
-    if data_args.task == 'multi' and data_args.valid_for_qg_only:
-        logger.info("processing valid data only for qg task")
-        valid_dataset = valid_dataset.filter(filter_qg)
-    else:
-        valid_dataset = valid_dataset.filter(TASK_TO_FILTER_FN[data_args.task])
-
-    
     train_dataset = processor.process(train_dataset)
     valid_dataset = processor.process(valid_dataset)
 
@@ -178,10 +142,10 @@ def main():
     valid_dataset.set_format(type='torch', columns=columns)
 
     if data_args.train_file_name is None:
-        train_file_name = f"train_data_{data_args.task}_{data_args.qg_format}_{data_args.model_type}.pt"
+        train_file_name = f"train_data_qaqg_{model_type}.pt"
         train_path = os.path.join("data", train_file_name)
 
-        valid_file_name = f"valid_data_{data_args.task}_{data_args.qg_format}_{data_args.model_type}.pt"
+        valid_file_name = f"valid_data_qaqg_{model_type}.pt"
         valid_path = os.path.join("data", valid_file_name)
     else:
         train_path = os.path.join("data", data_args.train_file_name)
@@ -193,7 +157,7 @@ def main():
     torch.save(valid_dataset, valid_path)
     logger.info(f"saved validation dataset at {valid_path}")
     
-    tokenizer_path = f"{data_args.model_type}_qg_tokenizer"
+    tokenizer_path = f"{model_type}_qaqg_tokenizer"
     if not os.path.exists(tokenizer_path):
         os.mkdir(tokenizer_path)
     tokenizer.save_pretrained(tokenizer_path)

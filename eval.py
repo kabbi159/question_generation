@@ -20,7 +20,6 @@ class EvalArguments:
     valid_file_path: str = field(
         metadata={"help": "Path for cached valid dataset"}
     )
-    model_type: str = field(metadata={"help": "One of 't5', 'bart'"})
     tokenizer_name_or_path: Optional[str] = field(
         default=None, metadata={"help": "Pretrained tokenizer name or path if not the same as model_name"}
     )
@@ -69,10 +68,10 @@ def main():
     valid_dataset = torch.load(args.valid_file_path)
     collator = T2TDataCollator(
         tokenizer=tokenizer,
-        model_type=args.model_type,
+        model_type="t5",
         mode="inference"
     )
-    loader = torch.utils.data.DataLoader(valid_dataset, batch_size=32, collate_fn=collator)
+    loader = torch.utils.data.DataLoader(valid_dataset, batch_size=8, collate_fn=collator)
 
     predictions = get_predictions(
         model=model,
@@ -82,7 +81,7 @@ def main():
         max_length=args.max_decoding_length
     )
 
-    with open(args.output_path, 'w') as f:
+    with open(args.output_path, 'w', encoding='UTF-8') as f:
         f.write("\n".join(predictions))
     
     logging.info(f"Output saved at {args.output_path}")
