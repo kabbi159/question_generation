@@ -50,3 +50,6 @@ python eval.py \
     --max_decoding_length 32 \
     --output_path results.txt
 ```
+
+# ACKNOWLEDGEMENT
+이 프로젝트는 2021년 1학기 창의자율연구(S.E.L.F.)
